@@ -36,6 +36,7 @@ public class DensityToGLSLTranspiler {
     
     // Cache DAG : évite de recalculer un sous-arbre identique (ref identity)
     private final Map<DensityFunction, String> evaluatedNodes = new IdentityHashMap<>();
+    private final Map<DensityFunction, Integer> evaluated2DIndices = new IdentityHashMap<>();
 
     public DensityToGLSLTranspiler() { }
 
@@ -48,64 +49,105 @@ public class DensityToGLSLTranspiler {
         fullShader.append("\n// --- SCOPE GLOBAL (SPLINES JIT) ---\n");
         fullShader.append(globalScopeBuilder.toString());
         
+        fullShader.append("\n// --- SHARED DATA ---\n");
+        fullShader.append("    shared float grid[1225];\n");
+        if (varCounter > 0) fullShader.append("    shared float cache2D_array[25][").append(varCounter).append("];\n");
+        
         fullShader.append("""
         void main() {
-            int localX = int(gl_LocalInvocationID.x);
-            int localZ = int(gl_LocalInvocationID.z);
+            uint idx = gl_LocalInvocationIndex;
             
-            global_x = float((chunkX * 16) + localX);
-            global_z = float((chunkZ * 16) + localZ);
-            
-            // === CACHE HOISTING 2D (calculé UNE SEULE FOIS par colonne) ===
-            global_y = 0.0; // Valeur neutre pour les évaluations 2D
+            // --- PHASE 1.A : CACHE 2D ---
+            while (idx < 25u) {
+                uint gridX = idx % 5u;
+                uint gridZ = idx / 5u;
+                float global_x = float(chunkX * 16 + gridX * 4);
+                float global_z = float(chunkZ * 16 + gridZ * 4);
+                float global_y = 0.0;
         """);
         
-        // Injection du buffer 2D pré-calculé
         fullShader.append(setup2DSnippets.toString());
         
         fullShader.append("""
+                idx += 256u;
+            }
+            barrier();
             
-            // --- CONTEXTE DE COMPRESSION RLE 1D ---
-            uint current_id = 0u;
-            uint run_count = 0u;
-            uint write_offset = uint((localZ * 16 + localX) * 384);
-            
-            for (int y_iter = MIN_Y; y_iter < MAX_Y; y_iter++) {
-                global_y = float(y_iter);
+            // --- PHASE 1.B : AST 3D SUR LA GRILLE ---
+            idx = gl_LocalInvocationIndex;
+            while (idx < 1225u) {
+                uint gridX = idx % 5u;
+                uint gridY = (idx / 5u) % 49u;
+                uint gridZ = idx / 245u;
+                uint idx2D = gridZ * 5u + gridX;
                 
-                // === EXPRESSION 3D INLINÉE (réutilise les registres 2D hoistés) ===
+                float global_x = float(chunkX * 16 + gridX * 4);
+                float global_y = float(-64 + gridY * 8);
+                float global_z = float(chunkZ * 16 + gridZ * 4);
         """);
         
         fullShader.append(loop3DSnippets.toString());
-        fullShader.append("        float final_density = ").append(inlinedExpression).append(";\n");
+        fullShader.append("        grid[idx] = ").append(inlinedExpression).append(";\n");
         
         fullShader.append("""
-                // === FIN AST ===
+                idx += 256u;
+            }
+            barrier();
+            
+            // --- PHASE 2 : INTERPOLATION ET RLE ---
+            uint b_idx = gl_LocalInvocationIndex;
+            if (b_idx < 256u) {
+                int localX = int(b_idx % 16u);
+                int localZ = int(b_idx / 16u);
+                int cx = localX / 4;
+                int cz = localZ / 4;
+                float tx = float(localX % 4) / 4.0;
+                float tz = float(localZ % 4) / 4.0;
                 
-                uint block_id = 0u; // Air
-                if (final_density > 0.0) {
-                    block_id = 1u; // Roche
-                } else if (y_iter < 63) {
-                    block_id = 2u; // Eau
-                }
+                uint write_offset = uint((localZ * 16 + localX) * 384);
+                uint current_id = 0u;
+                uint run_count = 0u;
                 
-                if (y_iter == MIN_Y) {
-                    current_id = block_id;
-                    run_count = 1u;
-                } else {
-                    if (block_id == current_id) {
-                        run_count++;
-                    } else {
-                        blocks[write_offset] = (run_count << 16) | (current_id & 0xFFFFu);
-                        write_offset++;
+                for (int y_iter = -64; y_iter < 320; y_iter++) {
+                    int cy = (y_iter - -64) / 8;
+                    float ty = float((y_iter - -64) % 8) / 8.0;
+                    
+                    float v000 = grid[cz * 245u + cy * 5u + cx];
+                    float v100 = grid[cz * 245u + cy * 5u + (cx + 1u)];
+                    float v010 = grid[cz * 245u + (cy + 1u) * 5u + cx];
+                    float v110 = grid[cz * 245u + (cy + 1u) * 5u + (cx + 1u)];
+                    float v001 = grid[(cz + 1u) * 245u + cy * 5u + cx];
+                    float v101 = grid[(cz + 1u) * 245u + cy * 5u + (cx + 1u)];
+                    float v011 = grid[(cz + 1u) * 245u + (cy + 1u) * 5u + cx];
+                    float v111 = grid[(cz + 1u) * 245u + (cy + 1u) * 5u + (cx + 1u)];
+                    
+                    float final_density = mix(
+                        mix(mix(v000, v100, tx), mix(v010, v110, tx), ty),
+                        mix(mix(v001, v101, tx), mix(v011, v111, tx), ty),
+                        tz
+                    );
+                    
+                    uint block_id = 0u; // Air
+                    if (final_density > 0.0) block_id = 1u; // Roche
+                    else if (y_iter < 63) block_id = 2u; // Eau
+                    
+                    if (y_iter == -64) {
                         current_id = block_id;
                         run_count = 1u;
+                    } else {
+                        if (block_id == current_id) {
+                            run_count++;
+                        } else {
+                            blocks[write_offset] = (run_count << 16) | (current_id & 0xFFFFu);
+                            write_offset++;
+                            current_id = block_id;
+                            run_count = 1u;
+                        }
                     }
                 }
+                blocks[write_offset] = (run_count << 16) | (current_id & 0xFFFFu);
+                blocks[write_offset + 1] = 0u;
             }
-            
-            blocks[write_offset] = (run_count << 16) | (current_id & 0xFFFFu);
-            blocks[write_offset + 1] = 0u;
         }
         """);
         
@@ -116,8 +158,10 @@ public class DensityToGLSLTranspiler {
 
     private String visit(DensityFunction node) {
         String typeName = getSimpleName(node);
-        System.out.println("[GPU DEBUG] visit() -> " + typeName);
         if (evaluatedNodes.containsKey(node)) {
+            if (evaluated2DIndices.containsKey(node) && !inCache2D) {
+                return "cache2D_array[idx2D][" + evaluated2DIndices.get(node) + "u]";
+            }
             return evaluatedNodes.get(node);
         }
         String result;
@@ -175,13 +219,15 @@ public class DensityToGLSLTranspiler {
             return result;
         }
 
-        String varName = (inCache2D ? "var2D_" : "var3D_") + (++varCounter);
+        int myVarId = ++varCounter;
+        String varName = (inCache2D ? "var2D_" : "var3D_") + myVarId;
         
         if (inCache2D) {
-            globalScopeBuilder.append("    float ").append(varName).append(";\n");
-            setup2DSnippets.append("    ").append(varName).append(" = ").append(result).append(";\n");
+            setup2DSnippets.append("                float ").append(varName).append(" = ").append(result).append(";\n");
+            setup2DSnippets.append("                cache2D_array[idx][").append(myVarId - 1).append("u] = ").append(varName).append(";\n");
+            evaluated2DIndices.put(node, myVarId - 1);
         } else {
-            loop3DSnippets.append("        float ").append(varName).append(" = ").append(result).append(";\n");
+            loop3DSnippets.append("                float ").append(varName).append(" = ").append(result).append(";\n");
         }
 
         evaluatedNodes.put(node, varName);
