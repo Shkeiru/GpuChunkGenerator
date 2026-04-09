@@ -740,6 +740,35 @@ public class DensityToGLSLTranspiler {
     }
     
     // ==================== SPLINE ====================
+
+    private DensityFunction extractCoordinateSafely(Object coordinateObj) throws Exception {
+        if (coordinateObj == null) {
+            throw new RuntimeException("Spline constante non supportée (coordinate est null).");
+        }
+        if (coordinateObj instanceof DensityFunction func) {
+            return func; /* Bypass simple */
+        }
+        
+        // Scan profond (Wrappers "Coordinate", "Holder", etc.)
+        for (java.lang.reflect.Field f : coordinateObj.getClass().getDeclaredFields()) {
+            f.setAccessible(true);
+            Object val = f.get(coordinateObj);
+            
+            if (val instanceof DensityFunction func) {
+                return func;
+            }
+            if (val != null && val.getClass().getName().contains("Holder")) {
+                try {
+                    java.lang.reflect.Method m = val.getClass().getMethod("value");
+                    Object unboxed = m.invoke(val);
+                    if (unboxed instanceof DensityFunction func) {
+                        return func;
+                    }
+                } catch(Exception ignored) {}
+            }
+        }
+        throw new RuntimeException("Impossible d'extraire Coordinate de la Spline. Le type trouvé est: " + coordinateObj.getClass().getName());
+    }
     
     private String visitSpline(DensityFunction node) throws Exception {
         CubicSpline<?, ?> rawSpline = (CubicSpline<?, ?>) getObj(node, "spline");
@@ -753,18 +782,7 @@ public class DensityToGLSLTranspiler {
         }
         if ("Multipoint".equals(splineType)) {
             Object coordinateObj = getObj(rawSpline, "coordinate");
-            DensityFunction coordinateFunc = null;
-            if (coordinateObj instanceof DensityFunction func) {
-                coordinateFunc = func;
-            } else {
-                for (java.lang.reflect.Field f : coordinateObj.getClass().getDeclaredFields()) {
-                    if (DensityFunction.class.isAssignableFrom(f.getType())) {
-                        f.setAccessible(true);
-                        coordinateFunc = (DensityFunction) f.get(coordinateObj);
-                        break;
-                    }
-                }
-            } 
+            DensityFunction coordinateFunc = extractCoordinateSafely(coordinateObj);
             String p = visit(coordinateFunc);
 
             float[] locs = (float[]) getObj(rawSpline, "locations");

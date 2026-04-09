@@ -33,8 +33,7 @@ public class GPUPacketDecoder {
 
         for (int z = 0; z < 16; z++) {
             for (int x = 0; x < 16; x++) {
-                
-                int columnOffset = (z * 16 + x) * 384;
+                int columnOffset = (z * 16 + x) * (maxY - minY);
                 
                 int yCursor = minY;
                 int readIndex = columnOffset;
@@ -59,7 +58,7 @@ public class GPUPacketDecoder {
                     
                     // Remplissage via API standard ProtoChunk (Heightmaps + Light gérés nativement)
                     for (int dy = 0; dy < count && yCursor < maxY; dy++) {
-                        pos.set(x, yCursor, z);
+                        pos.set(chunk.getPos().getMinBlockX() + x, yCursor, chunk.getPos().getMinBlockZ() + z);
                         chunk.setBlockState(pos, fillState, false);
                         yCursor++;
                     }

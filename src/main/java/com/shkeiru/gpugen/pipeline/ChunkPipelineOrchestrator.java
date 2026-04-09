@@ -59,6 +59,14 @@ public class ChunkPipelineOrchestrator {
             
             if (!initialized) {
                 System.err.println("[GPU Pipeline] Échec fatal de l'initialisation du contexte local.");
+                while (!Thread.currentThread().isInterrupted()) {
+                    ChunkRequest request = pendingRequests.poll();
+                    if (request != null) {
+                        request.future().completeExceptionally(new RuntimeException("GPU Initialization Failed"));
+                    } else {
+                        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    }
+                }
                 return;
             }
 
@@ -72,21 +80,22 @@ public class ChunkPipelineOrchestrator {
                 ComputeShaderManager.getInstance().setupComputePipeline(dynamicShaderSource, permutationData);
 
                 while (!Thread.currentThread().isInterrupted()) {
-                    ChunkRequest request = pendingRequests.poll();
-                    if (request != null) {
-                        try {
+                    ChunkRequest request = null;
+                    try {
+                        request = pendingRequests.poll();
+                        if (request != null) {
                             processRequest(request);
-                        } catch (Exception e) {
-                            System.err.println("[GPU Pipeline] Crash JIT ou Routage VRAM: " + e.getMessage());
-                            e.printStackTrace();
-                            request.future().complete(request.chunk()); 
-                        }
-                    } else {
-                        try {
+                        } else {
                             Thread.sleep(1); 
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
                         }
+                    } catch (Throwable t) {
+                        System.err.println("Crash isolé sur un chunk, passage au suivant...");
+                        t.printStackTrace();
+                        if (request != null && request.future() != null) {
+                            request.future().completeExceptionally(t); 
+                        }
+                        // SURTOUT PAS DE break; ou de return; ici !
+                        // La boucle DOIT continuer pour traiter les autres chunks.
                     }
                 }
             } catch (InterruptedException e) {
