@@ -560,14 +560,25 @@ public class DensityToGLSLTranspiler {
             
             if (improvedNoiseSampler != null) {
                 double[] coords = new double[3];
-                int c = 0;
                 int[] p = null;
+                
+                try {
+                    coords[0] = getDouble(improvedNoiseSampler, "xo");
+                    coords[1] = getDouble(improvedNoiseSampler, "yo");
+                    coords[2] = getDouble(improvedNoiseSampler, "zo");
+                } catch (Exception e) {
+                    java.lang.reflect.Field[] fields = improvedNoiseSampler.getClass().getDeclaredFields();
+                    java.util.Arrays.sort(fields, java.util.Comparator.comparing(java.lang.reflect.Field::getName));
+                    int cc = 0;
+                    for (java.lang.reflect.Field f : fields) {
+                        f.setAccessible(true);
+                        if (f.getType() == double.class && cc < 3) coords[cc++] = f.getDouble(improvedNoiseSampler);
+                    }
+                }
                 
                 for (java.lang.reflect.Field f : improvedNoiseSampler.getClass().getDeclaredFields()) {
                     f.setAccessible(true);
-                    if (f.getType() == double.class) {
-                        if (c < 3) coords[c++] = f.getDouble(improvedNoiseSampler);
-                    } else if (f.getType() == byte[].class) {
+                    if (f.getType() == byte[].class) {
                         byte[] byteArr = (byte[]) f.get(improvedNoiseSampler);
                         p = new int[byteArr.length];
                         for (int i=0; i<byteArr.length; i++) p[i] = byteArr[i] & 0xFF;
@@ -778,12 +789,13 @@ public class DensityToGLSLTranspiler {
                 String cond = (i == locs.length - 2) ? "else" : "else if (inputParam < " + formatFloat(loc1) + ")";
                 
                 globalScopeBuilder.append("    ").append(cond).append(" {\n");
-                globalScopeBuilder.append("        float t = (inputParam - ").append(formatFloat(loc0)).append(") / ").append(formatFloat(loc1 - loc0)).append(";\n");
+                globalScopeBuilder.append("        float delta = ").append(formatFloat(loc1 - loc0)).append(";\n");
+                globalScopeBuilder.append("        float t = (inputParam - ").append(formatFloat(loc0)).append(") / delta;\n");
                 globalScopeBuilder.append("        float t2 = t * t; float t3 = t2 * t;\n");
                 globalScopeBuilder.append("        return (2.0*t3 - 3.0*t2 + 1.0)*").append(formatFloat(val0))
-                                  .append(" + (t3 - 2.0*t2 + t)*").append(formatFloat(der0))
+                                  .append(" + (t3 - 2.0*t2 + t)*(").append(formatFloat(der0)).append(" * delta)")
                                   .append(" + (-2.0*t3 + 3.0*t2)*").append(formatFloat(val1))
-                                  .append(" + (t3 - t2)*").append(formatFloat(der1)).append(";\n");
+                                  .append(" + (t3 - t2)*(").append(formatFloat(der1)).append(" * delta);\n");
                 globalScopeBuilder.append("    }\n");
             }
             globalScopeBuilder.append("    return 0.0;\n}\n\n");
