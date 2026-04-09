@@ -1,15 +1,75 @@
 {
+  "minecraft:recipes/transportation/mangrove_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
+  },
   "minecraft:recipes/decorations/crafting_table": {
     "criteria": {
-      "unlock_right_away": "2026-04-09 00:55:45 +0200"
+      "unlock_right_away": "2026-04-09 17:52:54 +0200"
+    },
+    "done": true
+  },
+  "minecraft:recipes/transportation/acacia_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
+  },
+  "minecraft:recipes/transportation/cherry_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
     },
     "done": true
   },
   "minecraft:adventure/adventuring_time": {
     "criteria": {
-      "minecraft:old_growth_birch_forest": "2026-04-09 00:55:46 +0200"
+      "minecraft:flower_forest": "2026-04-09 17:52:55 +0200",
+      "minecraft:desert": "2026-04-09 17:55:02 +0200",
+      "minecraft:forest": "2026-04-09 17:53:42 +0200",
+      "minecraft:river": "2026-04-09 18:06:32 +0200",
+      "minecraft:lukewarm_ocean": "2026-04-09 17:55:09 +0200",
+      "minecraft:plains": "2026-04-09 17:53:08 +0200",
+      "minecraft:warm_ocean": "2026-04-09 17:55:07 +0200"
     },
     "done": false
+  },
+  "minecraft:recipes/transportation/bamboo_raft": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
+  },
+  "minecraft:recipes/transportation/spruce_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
+  },
+  "minecraft:recipes/transportation/birch_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
+  },
+  "minecraft:recipes/transportation/oak_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
+  },
+  "minecraft:recipes/transportation/jungle_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
+  },
+  "minecraft:recipes/transportation/dark_oak_boat": {
+    "criteria": {
+      "in_water": "2026-04-09 17:53:24 +0200"
+    },
+    "done": true
   },
   "DataVersion": 3955
 }

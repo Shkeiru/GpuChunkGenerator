@@ -23,7 +23,6 @@ public class ComputeShaderManager {
 
     private long windowHandle = MemoryUtil.NULL;
     private int computeProgram = 0;
-    private int inputSSBO = 0;
     private int outputSSBO = 0;
     private int permutationSSBO = 0;
 
@@ -83,10 +82,6 @@ public class ComputeShaderManager {
         
         System.out.println("[GPU JIT] Compilation GLSL Dynamique Réussie !");
 
-        inputSSBO = GL43C.glGenBuffers();
-        GL43C.glBindBuffer(GL43C.GL_SHADER_STORAGE_BUFFER, inputSSBO);
-        GL43C.glBufferData(GL43C.GL_SHADER_STORAGE_BUFFER, 8L, GL43C.GL_DYNAMIC_DRAW);
-
         outputSSBO = GL43C.glGenBuffers();
         GL43C.glBindBuffer(GL43C.GL_SHADER_STORAGE_BUFFER, outputSSBO);
         GL43C.glBufferData(GL43C.GL_SHADER_STORAGE_BUFFER, OUTPUT_BUFFER_SIZE, GL43C.GL_DYNAMIC_COPY);
@@ -106,28 +101,20 @@ public class ComputeShaderManager {
     }
 
     public void dispatchChunkGeneration(int chunkX, int chunkZ) {
-        ByteBuffer inputBuffer = MemoryUtil.memAlloc(8);
-        try {
-            inputBuffer.putInt(0, chunkX);
-            inputBuffer.putInt(4, chunkZ);
-            
-            GL43C.glBindBuffer(GL43C.GL_SHADER_STORAGE_BUFFER, inputSSBO);
-            GL43C.glBufferSubData(GL43C.GL_SHADER_STORAGE_BUFFER, 0, inputBuffer);
+        GL20C.glUseProgram(computeProgram);
+        
+        int locX = GL20C.glGetUniformLocation(computeProgram, "chunkX");
+        int locZ = GL20C.glGetUniformLocation(computeProgram, "chunkZ");
+        GL20C.glUniform1i(locX, chunkX);
+        GL20C.glUniform1i(locZ, chunkZ);
 
-            GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 0, inputSSBO);
-            GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 1, outputSSBO);
-            GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 2, permutationSSBO);
+        GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 1, outputSSBO);
+        GL43C.glBindBufferBase(GL43C.GL_SHADER_STORAGE_BUFFER, 2, permutationSSBO);
 
-            GL20C.glUseProgram(computeProgram);
+        // Dimension 2D (L'axe Y est géré à l'intérieur du Kernel par la boucle for)
+        GL43C.glDispatchCompute(1, 1, 1);
 
-            // Dimension 2D (L'axe Y est géré à l'intérieur du Kernel par la boucle for)
-            GL43C.glDispatchCompute(1, 1, 1);
-
-            GL43C.glMemoryBarrier(GL43C.GL_SHADER_STORAGE_BARRIER_BIT);
-            
-        } finally {
-            MemoryUtil.memFree(inputBuffer);
-        }
+        GL43C.glMemoryBarrier(GL43C.GL_SHADER_STORAGE_BARRIER_BIT);
     }
 
     public byte[] fetchAndFreeResult() {
@@ -149,7 +136,6 @@ public class ComputeShaderManager {
 
     public void cleanup() {
         if (computeProgram != 0) GL20C.glDeleteProgram(computeProgram);
-        if (inputSSBO != 0) GL43C.glDeleteBuffers(inputSSBO);
         if (outputSSBO != 0) GL43C.glDeleteBuffers(outputSSBO);
         if (permutationSSBO != 0) GL43C.glDeleteBuffers(permutationSSBO);
         if (windowHandle != MemoryUtil.NULL) GLFW.glfwDestroyWindow(windowHandle);

@@ -18,11 +18,16 @@ public class DensityToGLSLTranspiler {
     private int splineIndex = 0;
     private int noiseIndex = 0;
     private int cacheCounter = 0;
+    private int varCounter = 0;
+    private boolean inCache2D = false;
     
     private final StringBuilder globalScopeBuilder = new StringBuilder();
     
     // Buffer 2D : code GLSL injecté AVANT la boucle Y (hoisting)
     private final StringBuilder setup2DSnippets = new StringBuilder();
+    
+    // Buffer 3D : code GLSL injecté DANS la boucle Y
+    private final StringBuilder loop3DSnippets = new StringBuilder();
     
     // Pour les Permutations GPU :
     private final Map<Object, NoiseInfo> noiseRegistry = new IdentityHashMap<>();
@@ -71,6 +76,7 @@ public class DensityToGLSLTranspiler {
                 // === EXPRESSION 3D INLINÉE (réutilise les registres 2D hoistés) ===
         """);
         
+        fullShader.append(loop3DSnippets.toString());
         fullShader.append("        float final_density = ").append(inlinedExpression).append(";\n");
         
         fullShader.append("""
@@ -109,11 +115,11 @@ public class DensityToGLSLTranspiler {
     // ==================== VISITEUR PRINCIPAL ====================
 
     private String visit(DensityFunction node) {
+        String typeName = getSimpleName(node);
+        System.out.println("[GPU DEBUG] visit() -> " + typeName);
         if (evaluatedNodes.containsKey(node)) {
             return evaluatedNodes.get(node);
         }
-
-        String typeName = getSimpleName(node);
         String result;
         
         try {
@@ -164,8 +170,22 @@ public class DensityToGLSLTranspiler {
             result = "0.0";
         }
 
-        evaluatedNodes.put(node, result);
-        return result;
+        if (typeName.equals("Constant") || result.equals("0.0") || result.equals("1.0")) {
+            evaluatedNodes.put(node, result);
+            return result;
+        }
+
+        String varName = (inCache2D ? "var2D_" : "var3D_") + (++varCounter);
+        
+        if (inCache2D) {
+            globalScopeBuilder.append("    float ").append(varName).append(";\n");
+            setup2DSnippets.append("    ").append(varName).append(" = ").append(result).append(";\n");
+        } else {
+            loop3DSnippets.append("        float ").append(varName).append(" = ").append(result).append(";\n");
+        }
+
+        evaluatedNodes.put(node, varName);
+        return varName;
     }
     
     // ==================== CACHE HOISTING ====================
@@ -176,27 +196,16 @@ public class DensityToGLSLTranspiler {
      * stocké dans un registre local, et réutilisé 384 fois sans recalcul.
      */
     private String hoistCache2D(DensityFunction node) throws Exception {
-        // Extraire la fonction encapsulée dans le cache
-        DensityFunction inner = unwrapMarker(node);
+        boolean prev = inCache2D;
+        inCache2D = true;
         
-        // Évaluer l'expression inline du sous-arbre
+        DensityFunction inner = unwrapMarker(node);
         String evaluatedGLSL = visit(inner);
         
-        // Générer un nom de variable unique
-        String cacheName = "cache_2d_" + (cacheCounter++);
+        inCache2D = prev;
         
-        // Écrire la déclaration dans le buffer 2D (avant la boucle Y)
-        setup2DSnippets.append("        float ")
-                       .append(cacheName)
-                       .append(" = ")
-                       .append(evaluatedGLSL)
-                       .append("; // Hoisted from ")
-                       .append(getSimpleName(node))
-                       .append("\n");
-        
-        // Retourner le NOM de la variable (pas l'expression) -> 
-        // l'expression 3D lira directement ce registre local
-        return cacheName;
+        // evaluatedGLSL IS ALREADY a generated var2D identifier because visit() processed it in Cache2D.
+        return evaluatedGLSL;
     }
     
     // ==================== VISITEURS SPÉCIALISÉS ====================
@@ -251,9 +260,18 @@ public class DensityToGLSLTranspiler {
     
     // ==================== NOISE fBm ====================
     
+    private double getScaleSafety(DensityFunction node, String... fields) {
+        for (String f : fields) {
+            try { return getDouble(node, f); } catch (Exception ignored) {}
+        }
+        return 1.0;
+    }
+
     private String visitNoise(DensityFunction node) throws Exception {
         NoiseInfo info = extractNoiseParams(node);
-        return formatMojangNoiseCall(info, "vec3(global_x, global_y, global_z)");
+        double xzScale = getScaleSafety(node, "xzScale", "xz_scale");
+        double yScale  = getScaleSafety(node, "yScale", "y_scale");
+        return formatMojangNoiseCall(info, "vec3(global_x * " + formatDouble(xzScale) + ", global_y * " + formatDouble(yScale) + ", global_z * " + formatDouble(xzScale) + ")");
     }
     
     private String visitShiftedNoise(DensityFunction node) throws Exception {
@@ -261,7 +279,9 @@ public class DensityToGLSLTranspiler {
         String sy = visit(getFunc(node, "shiftY"));
         String sz = visit(getFunc(node, "shiftZ"));
         NoiseInfo info = extractNoiseParams(node);
-        return formatMojangNoiseCall(info, "vec3(global_x + " + sx + ", global_y + " + sy + ", global_z + " + sz + ")");
+        double xzScale = getScaleSafety(node, "xzScale", "xz_scale");
+        double yScale  = getScaleSafety(node, "yScale", "y_scale");
+        return formatMojangNoiseCall(info, "vec3(global_x * " + formatDouble(xzScale) + " + " + sx + ", global_y * " + formatDouble(yScale) + " + " + sy + ", global_z * " + formatDouble(xzScale) + " + " + sz + ")");
     }
     
     /**
@@ -273,7 +293,7 @@ public class DensityToGLSLTranspiler {
             // Fallback
             return "sample_improved_noise(vec3((global_x) * 0.25, 0.0, (global_z) * 0.25), 0) * 4.0";
         }
-        return formatMojangNoiseCall(info, "vec3(global_x, 0.0, global_z)");
+        return "(" + formatMojangNoiseCall(info, "vec3(global_x * 0.25, 0.0, global_z * 0.25)") + " * 4.0)";
     }
     
     /**
@@ -284,7 +304,7 @@ public class DensityToGLSLTranspiler {
         if (info.amplitudes.length <= 1 && info.amplitudes[0] == 1.0 && info.firstOctave == -7 && info.offset1 == 0 && info.offset2 == 0) {
             return "sample_improved_noise(vec3((global_z) * 0.25, 0.0, (global_x) * 0.25), 0) * 4.0";
         }
-        return formatMojangNoiseCall(info, "vec3(global_z, global_x, 0.0)");
+        return "(" + formatMojangNoiseCall(info, "vec3(global_z * 0.25, global_x * 0.25, 0.0)") + " * 4.0)";
     }
     
     /**
@@ -295,12 +315,60 @@ public class DensityToGLSLTranspiler {
         if (info.amplitudes.length <= 1 && info.amplitudes[0] == 1.0 && info.firstOctave == -7 && info.offset1 == 0 && info.offset2 == 0) {
             return "sample_improved_noise(vec3((global_x) * 0.25, global_y * 0.25, (global_z) * 0.25), 0) * 4.0"; // Fallback if no noise found
         }
-        return formatMojangNoiseCall(info, "vec3(global_x, global_y, global_z)");
+        return "(" + formatMojangNoiseCall(info, "vec3(global_x * 0.25, global_y * 0.25, global_z * 0.25)") + " * 4.0)";
     }
     
     private String visitBlendedNoise(DensityFunction node) throws Exception {
-        NoiseInfo mock = new NoiseInfo(-7, new double[]{1.0, 0.5, 0.25, 0.125}, 0, 0, 1.0);
-        return formatMojangNoiseCall(mock, "vec3(global_x, global_y, global_z)");
+        Object minLimit;
+        Object maxLimit;
+        Object mainNoise;
+        try {
+            minLimit = getObj(node, "minLimitNoise");
+            maxLimit = getObj(node, "maxLimitNoise");
+            mainNoise = getObj(node, "mainNoise");
+        } catch (Exception e) {
+            System.err.println("[GPU DEBUG] Cannot find BlendedNoise core fields! " + e.getMessage());
+            return "0.0";
+        }
+        
+        double xzMul = 1.0; double yMul = 1.0;
+        double xzFac = 1.0; double yFac = 1.0;
+        double smear = 8.0;
+        
+        try {
+            xzMul = getDouble(node, "xzMultiplier");
+            yMul = getDouble(node, "yMultiplier");
+            xzFac = getDouble(node, "xzFactor");
+            yFac = getDouble(node, "yFactor");
+            smear = getDouble(node, "smearScaleMultiplier");
+        } catch (Exception ignored) {}
+
+        NoiseInfo minInfo = extractNoiseParamsFallback(minLimit);
+        NoiseInfo maxInfo = extractNoiseParamsFallback(maxLimit);
+        NoiseInfo mainInfo = extractNoiseParamsFallback(mainNoise);
+        
+        String g = "(" + formatMojangNoiseCall(mainInfo, "vec3(global_x * " + formatDouble(xzMul) + ", global_y * " + formatDouble(yMul) + ", global_z * " + formatDouble(xzMul) + ")") + " * " + formatDouble(smear) + ")";
+        String h = formatMojangNoiseCall(minInfo, "vec3(global_x * " + formatDouble(xzFac) + ", global_y * " + formatDouble(yFac) + ", global_z * " + formatDouble(xzFac) + ")");
+        String l = formatMojangNoiseCall(maxInfo, "vec3(global_x * " + formatDouble(xzFac) + ", global_y * " + formatDouble(yFac) + ", global_z * " + formatDouble(xzFac) + ")");
+
+        return "mix(" + h + ", " + l + ", clamp(((" + g + ") / 10.0 + 1.0) / 2.0, 0.0, 1.0))";
+    }
+    
+    private NoiseInfo extractNoiseParamsFallback(Object doublePerlin) {
+        if (doublePerlin == null) return new NoiseInfo(-7, new double[]{1.0, 1.0}, 0, 0, 1.0);
+        if (noiseRegistry.containsKey(doublePerlin)) return noiseRegistry.get(doublePerlin);
+        // Use a wrapper dummy node to reuse the existing extraction logic
+        return extractNoiseParams(new DensityFunction() {
+            @Override public double compute(FunctionContext c) { return 0; }
+            @Override public void fillArray(double[] array, ContextProvider p) {}
+            @Override public DensityFunction mapAll(Visitor visitor) { return this; }
+            @Override public double minValue() { return 0; }
+            @Override public double maxValue() { return 0; }
+            @Override public net.minecraft.util.KeyDispatchDataCodec<? extends DensityFunction> codec() { return null; }
+            
+            // Magic trick: override findNoiseHolder behavior in reflection by implementing a field called "value" pointing to doublePerlin
+            public Object value = doublePerlin;
+        });
     }
     
     // ==================== NOISE PARAMETER EXTRACTION ====================
@@ -310,6 +378,7 @@ public class DensityToGLSLTranspiler {
     private NoiseInfo extractNoiseParams(DensityFunction node) {
         try {
             Object noiseHolder = findNoiseHolder(node);
+            System.out.println("[GPU DEBUG] extractNoiseParams for node " + node.getClass().getSimpleName() + " found holder: " + (noiseHolder != null ? noiseHolder.getClass().getSimpleName() : "null"));
             if (noiseHolder == null) return new NoiseInfo(-7, new double[]{1.0, 1.0}, 0, 0, 1.0);
             
             Object doublePerlin = noiseHolder;
@@ -317,8 +386,8 @@ public class DensityToGLSLTranspiler {
                 doublePerlin = h.value();
             }
             
-            // Robust unwrapping de NoiseHolder / NormalNoise / Holder vers DoublePerlinNoiseSampler
-            while (doublePerlin != null && !getSimpleName(doublePerlin).equals("DoublePerlinNoiseSampler")) {
+            // Robust unwrapping de NoiseHolder / NormalNoise / Holder vers NormalNoise
+            while (doublePerlin != null && !getSimpleName(doublePerlin).equals("NormalNoise")) {
                 Object next = null;
                 // Essaie les méthodes classiques
                 try { next = getObj(doublePerlin, "value"); } catch (Exception ignored) {}
@@ -332,7 +401,7 @@ public class DensityToGLSLTranspiler {
                         Object val = f.get(doublePerlin);
                         if (val != null) {
                             String name = getSimpleName(val);
-                            if (name.equals("NormalNoise") || name.equals("DoublePerlinNoiseSampler") || val instanceof net.minecraft.core.Holder<?>) {
+                            if (name.equals("NormalNoise") || val instanceof net.minecraft.core.Holder<?>) {
                                 next = val;
                                 break;
                             }
@@ -343,49 +412,75 @@ public class DensityToGLSLTranspiler {
                 doublePerlin = next;
             }
             
-            if (doublePerlin == null || !getSimpleName(doublePerlin).equals("DoublePerlinNoiseSampler")) {
+            if (doublePerlin == null || !getSimpleName(doublePerlin).equals("NormalNoise")) {
+                if (doublePerlin != null) {
+                    System.out.println("[GPU DEBUG] Fallback to default noise info: doublePerlin is " + getSimpleName(doublePerlin));
+                    for (java.lang.reflect.Field f : doublePerlin.getClass().getDeclaredFields()) {
+                        System.out.println("[GPU DEBUG]  - Field: " + f.getType().getSimpleName() + " " + f.getName());
+                    }
+                } else {
+                    System.out.println("[GPU DEBUG] Fallback to default noise info: doublePerlin is null");
+                }
                 return new NoiseInfo(-7, new double[]{1.0, 1.0}, 0, 0, 1.0);
             }
+            
+            System.out.println("[GPU DEBUG] Successfully extracted DoublePerlinNoiseSampler!");
             
             if (noiseRegistry.containsKey(doublePerlin)) {
                 return noiseRegistry.get(doublePerlin);
             }
             
-            // Extract from DoublePerlinNoiseSampler
             double doubleAmplitude = 1.0;
-            for (java.lang.reflect.Field f : doublePerlin.getClass().getDeclaredFields()) {
-                f.setAccessible(true);
-                try {
+            try {
+                doubleAmplitude = getDouble(doublePerlin, "valueFactor");
+            } catch (Exception e) {
+                // Try first double as fallback
+                for (java.lang.reflect.Field f : doublePerlin.getClass().getDeclaredFields()) {
+                    f.setAccessible(true);
                     if (f.getType() == double.class) {
-                        double val = f.getDouble(doublePerlin);
-                        if (doubleAmplitude == 1.0) doubleAmplitude = val;
+                        try { doubleAmplitude = f.getDouble(doublePerlin); } catch (Exception ignored) {}
                         break;
                     }
-                } catch (Exception ignored) {}
+                }
             }
             
             Object firstOctavePerlin = null;
             Object secondOctavePerlin = null;
-            for (java.lang.reflect.Field f : doublePerlin.getClass().getDeclaredFields()) {
-                f.setAccessible(true);
-                try {
-                    if (!f.getType().isPrimitive()) {
-                        Object val = f.get(doublePerlin);
-                        if (val != null) {
-                            if (firstOctavePerlin == null) firstOctavePerlin = val;
-                            else if (secondOctavePerlin == null) secondOctavePerlin = val;
+            try {
+                firstOctavePerlin = getObj(doublePerlin, "first");
+                secondOctavePerlin = getObj(doublePerlin, "second");
+            } catch (Exception e) {
+                for (java.lang.reflect.Field f : doublePerlin.getClass().getDeclaredFields()) {
+                    f.setAccessible(true);
+                    try {
+                        if (!f.getType().isPrimitive() && f.getType().getSimpleName().equals("PerlinNoise")) {
+                            Object val = f.get(doublePerlin);
+                            if (val != null) {
+                                if (firstOctavePerlin == null) firstOctavePerlin = val;
+                                else if (secondOctavePerlin == null) secondOctavePerlin = val;
+                            }
                         }
-                    }
-                } catch (Exception ignored) {}
+                    } catch (Exception ignored) {}
+                }
             }
             
             int offset1 = allocateOctavesFor(firstOctavePerlin);
             int offset2 = allocateOctavesFor(secondOctavePerlin);
             
             int firstOctave = -7;
-            try { firstOctave = getInt(firstOctavePerlin, "firstOctave"); } catch (Exception ignored) {}
-            
-            double[] amplitudes = extractAmplitudesFromOctave(firstOctavePerlin);
+            double[] amplitudes = new double[]{1.0, 1.0};
+            try {
+                Object parameters = getObj(doublePerlin, "parameters");
+                if (parameters != null) {
+                    firstOctave = getInt(parameters, "firstOctave");
+                    Object ampsList = getObj(parameters, "amplitudes");
+                    amplitudes = extractDoubleArray(ampsList);
+                }
+            } catch (Exception e) {
+                // Secondary check inside firstOctavePerlin wrapper if parameters fails
+                try { firstOctave = getInt(firstOctavePerlin, "firstOctave"); } catch (Exception ignored) {}
+                amplitudes = extractAmplitudesFromOctave(firstOctavePerlin);
+            }
             
             NoiseInfo result = new NoiseInfo(firstOctave, amplitudes, offset1, offset2, doubleAmplitude);
             noiseRegistry.put(doublePerlin, result);

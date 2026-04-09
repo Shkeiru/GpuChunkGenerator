@@ -11,10 +11,8 @@ public class GLSLSnippets {
         
         layout(local_size_x = 16, local_size_y = 1, local_size_z = 16) in;
         
-        layout(std430, binding = 0) readonly buffer InputBuffer {
-            int chunkX;
-            int chunkZ;
-        };
+        uniform int chunkX;
+        uniform int chunkZ;
         
         layout(std430, binding = 1) writeonly buffer OutputBuffer {
             uint blocks[]; // Tableau linéaire des uints packés RLE
@@ -121,7 +119,7 @@ public class GLSLSnippets {
             sb.append("    float freq2 = freq1;\n");
             sb.append("    vec3 first_pos = pos * freq1;\n");
             sb.append("    vec3 second_pos = pos * 1.0181268882175227 * freq1;\n");
-            sb.append("    float amp_seq = pow(2.0, -float(first_octave));\n");
+            sb.append("    float amp_seq = pow(2.0, ").append(i - 1).append(".0) / (pow(2.0, ").append(i).append(".0) - 1.0);\n");
             sb.append("    for (int i = 0; i < ").append(i).append("; i++) {\n");
             sb.append("        if (amps[i] != 0.0) {\n");
             sb.append("            first_val += amps[i] * amp_seq * sample_improved_noise(first_pos, offset1 + i);\n");

@@ -39,9 +39,8 @@ public class MixinNoiseBasedChunkGenerator {
                 System.out.println("[GPU Mixin] Interception Initiale LAZY (Zero-Config)...");
                 System.out.println("[GPU Mixin] Traduction de l'AST du Datapack courant vers GLSL On-The-Fly !");
                 
-                // On cast prudemment this en notre cible pour extraire le Holder resolu.
-                NoiseBasedChunkGenerator self = (NoiseBasedChunkGenerator) (Object) this;
-                var finalDensityProvider = self.generatorSettings().value().noiseRouter().finalDensity();
+                // L'AST est extrait depuis le RandomState qui contient les instances ancrées sur la Seed du monde.
+                var finalDensityProvider = randomState.router().finalDensity();
                 
                 DensityToGLSLTranspiler transpiler = new DensityToGLSLTranspiler();
                 String glslSource = transpiler.compileShaderSource(finalDensityProvider);
