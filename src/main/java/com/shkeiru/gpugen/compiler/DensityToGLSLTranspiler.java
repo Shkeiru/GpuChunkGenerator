@@ -700,114 +700,59 @@ public class DensityToGLSLTranspiler {
     
     private String visitSpline(DensityFunction node) throws Exception {
         CubicSpline<?, ?> rawSpline = (CubicSpline<?, ?>) getObj(node, "spline");
-        Object coordinateObj = getObj(rawSpline, "coordinate");
-        DensityFunction coordinateFunc = unwrapSplineCoordinate(coordinateObj);
-        String coordinateExpr = visit(coordinateFunc);
-        String methodName = generateSplineFunction(rawSpline);
-        return methodName + "(" + coordinateExpr + ")";
-    }
-    
-    private DensityFunction unwrapSplineCoordinate(Object coordinate) throws Exception {
-        if (coordinate instanceof DensityFunction df) return df;
-        
-        try {
-            Object holder = getObj(coordinate, "function");
-            if (holder instanceof net.minecraft.core.Holder<?> h) {
-                Object val = h.value();
-                if (val instanceof DensityFunction df) return df;
-            }
-            if (holder instanceof DensityFunction df) return df;
-        } catch (Exception ignored) {}
-        
-        try {
-            Object holder = getObj(coordinate, "holder");
-            if (holder instanceof net.minecraft.core.Holder<?> h) {
-                Object val = h.value();
-                if (val instanceof DensityFunction df) return df;
-            }
-        } catch (Exception ignored) {}
-        
-        Class<?> clazz = coordinate.getClass();
-        while (clazz != null && clazz != Object.class) {
-            for (Field f : clazz.getDeclaredFields()) {
-                f.setAccessible(true);
-                Object val = f.get(coordinate);
-                if (val instanceof DensityFunction df) return df;
-                if (val instanceof net.minecraft.core.Holder<?> h) {
-                    try {
-                        Object inner = h.value();
-                        if (inner instanceof DensityFunction df) return df;
-                    } catch (Exception ignored) {}
-                }
-            }
-            clazz = clazz.getSuperclass();
-        }
-        
-        for (Class<?> iface : coordinate.getClass().getInterfaces()) {
-            if (DensityFunction.class.isAssignableFrom(iface)) {
-                return (DensityFunction) coordinate;
-            }
-        }
-        
-        System.err.println("[GPU JIT] Spline$Coordinate unwrap échoué: " + coordinate.getClass().getName());
-        for (Field f : coordinate.getClass().getDeclaredFields()) {
-            f.setAccessible(true);
-            System.err.println("[GPU JIT]   " + f.getName() + " : " + f.getType().getSimpleName() + " = " + f.get(coordinate));
-        }
-        throw new RuntimeException("Unwrap Spline$Coordinate échoué");
+        return inlineSpline(rawSpline);
     }
 
-    private String generateSplineFunction(CubicSpline<?, ?> rawSpline) throws Exception {
-        String methodName = "eval_spline_" + (splineIndex++);
-        globalScopeBuilder.append("float ").append(methodName).append("(float inputParam) {\n");
-        
+    private String inlineSpline(CubicSpline<?, ?> rawSpline) throws Exception {
         String splineType = getSimpleName(rawSpline);
         if ("Constant".equals(splineType)) {
-            float val = getFloat(rawSpline, "value");
-            globalScopeBuilder.append("    return ").append(formatFloat(val)).append(";\n}\n\n");
-            return methodName;
+            return formatFloat(getFloat(rawSpline, "value"));
         }
-
         if ("Multipoint".equals(splineType)) {
+            Object coordinateObj = getObj(rawSpline, "coordinate");
+            // Astuce : dans Multipoint, la coordonnée EST la DensityFunction elle-même
+            DensityFunction coordinateFunc = (DensityFunction) coordinateObj; 
+            String p = visit(coordinateFunc);
+
             float[] locs = (float[]) getObj(rawSpline, "locations");
             float[] derivs = (float[]) getObj(rawSpline, "derivatives");
             @SuppressWarnings("unchecked")
             List<CubicSpline<?, ?>> containedValues = (List<CubicSpline<?, ?>>) getObj(rawSpline, "values");
-            
-            float firstVal = extractStaticValue(containedValues.get(0));
-            float lastVal = extractStaticValue(containedValues.get(containedValues.size() - 1));
-            
-            globalScopeBuilder.append("    if (inputParam <= ").append(formatFloat(locs[0])).append(") { return ").append(formatFloat(firstVal)).append("; }\n");
-            globalScopeBuilder.append("    if (inputParam >= ").append(formatFloat(locs[locs.length - 1])).append(") { return ").append(formatFloat(lastVal)).append("; }\n");
 
+            List<String> vals = new java.util.ArrayList<>();
+            for (CubicSpline<?, ?> child : containedValues) {
+                vals.add(inlineSpline(child)); // Récursion vitale pour les splines imbriquées !
+            }
+
+            StringBuilder sb = new StringBuilder("(");
             for (int i = 0; i < locs.length - 1; i++) {
                 float loc0 = locs[i], loc1 = locs[i + 1];
-                float val0 = extractStaticValue(containedValues.get(i));
-                float val1 = extractStaticValue(containedValues.get(i + 1));
+                String val0 = vals.get(i), val1 = vals.get(i + 1);
                 float der0 = derivs[i], der1 = derivs[i + 1];
-                
-                String cond = (i == locs.length - 2) ? "else" : "else if (inputParam < " + formatFloat(loc1) + ")";
-                
-                globalScopeBuilder.append("    ").append(cond).append(" {\n");
-                globalScopeBuilder.append("        float delta = ").append(formatFloat(loc1 - loc0)).append(";\n");
-                globalScopeBuilder.append("        float t = (inputParam - ").append(formatFloat(loc0)).append(") / delta;\n");
-                globalScopeBuilder.append("        float t2 = t * t; float t3 = t2 * t;\n");
-                globalScopeBuilder.append("        return (2.0*t3 - 3.0*t2 + 1.0)*").append(formatFloat(val0))
-                                  .append(" + (t3 - 2.0*t2 + t)*(").append(formatFloat(der0)).append(" * delta)")
-                                  .append(" + (-2.0*t3 + 3.0*t2)*").append(formatFloat(val1))
-                                  .append(" + (t3 - t2)*(").append(formatFloat(der1)).append(" * delta);\n");
-                globalScopeBuilder.append("    }\n");
+                float delta = loc1 - loc0;
+
+                String t = "((" + p + " - " + formatFloat(loc0) + ") / " + formatFloat(delta) + ")";
+                String t2 = "(" + t + " * " + t + ")";
+                String t3 = "(" + t2 + " * " + t + ")";
+
+                String hermite = "((2.0*" + t3 + " - 3.0*" + t2 + " + 1.0)*(" + val0 + ") + " +
+                                 "(" + t3 + " - 2.0*" + t2 + " + " + t + ")*" + formatFloat(der0 * delta) + " + " +
+                                 "(-2.0*" + t3 + " + 3.0*" + t2 + ")*(" + val1 + ") + " +
+                                 "(" + t3 + " - " + t2 + ")*" + formatFloat(der1 * delta) + ")";
+
+                if (i == 0) {
+                    sb.append("(").append(p).append(" <= ").append(formatFloat(loc0)).append(") ? (").append(val0).append(") : ");
+                }
+                if (i == locs.length - 2) {
+                    sb.append("(").append(p).append(" < ").append(formatFloat(loc1)).append(") ? ").append(hermite).append(" : (").append(val1).append(")");
+                } else {
+                    sb.append("(").append(p).append(" < ").append(formatFloat(loc1)).append(") ? ").append(hermite).append(" : ");
+                }
             }
-            globalScopeBuilder.append("    return 0.0;\n}\n\n");
-            return methodName;
+            sb.append(")");
+            return sb.toString();
         }
-        
-        throw new RuntimeException("CubicSpline inconnu: " + splineType);
-    }
-    
-    private float extractStaticValue(CubicSpline<?, ?> spline) throws Exception {
-        if ("Constant".equals(getSimpleName(spline))) return getFloat(spline, "value");
-        return 0.0f; 
+        return "0.0";
     }
     
     // ==================== UNWRAP HELPERS ====================
