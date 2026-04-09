@@ -1,0 +1,28 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="All rights reserved"
+
+[[mods]]
+modId="gpugen"
+version="1.0.0"
+displayName="GPU World Gen"
+authors="shkeiru"
+description="Experimental GPU-accelerated world generation via compute shaders. Now Data-Driven Zero-Config."
+logoFile="logo.png"
+
+[[dependencies.gpugen]]
+    modId="neoforge"
+    type="required"
+    versionRange="[21.1,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.gpugen]]
+    modId="minecraft"
+    type="required"
+    versionRange="[1.21.1,1.22)"
+    ordering="NONE"
+    side="BOTH"
+
+[[mixins]]
+config="mixins.gpugen.json"

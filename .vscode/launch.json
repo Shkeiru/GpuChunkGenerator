@@ -1,0 +1,49 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "request": "launch",
+      "name": "Client",
+      "presentation": {
+        "group": "Mod Development - GpuChunkGenerator",
+        "order": 0
+      },
+      "projectName": "GpuChunkGenerator",
+      "mainClass": "net.neoforged.devlaunch.Main",
+      "args": [
+        "@/home/shkeiru/Documents/Programmes/Java/Minecraft/Mods/1.21.1/GpuChunkGenerator/build/moddev/clientRunProgramArgs.txt"
+      ],
+      "vmArgs": [
+        "@/home/shkeiru/Documents/Programmes/Java/Minecraft/Mods/1.21.1/GpuChunkGenerator/build/moddev/clientRunVmArgs.txt",
+        "-Dfml.modFolders\u003dgpugen%%/home/shkeiru/Documents/Programmes/Java/Minecraft/Mods/1.21.1/GpuChunkGenerator/bin/main"
+      ],
+      "cwd": "${workspaceFolder}/run",
+      "env": {},
+      "console": "internalConsole",
+      "shortenCommandLine": "none"
+    },
+    {
+      "type": "java",
+      "request": "launch",
+      "name": "Server",
+      "presentation": {
+        "group": "Mod Development - GpuChunkGenerator",
+        "order": 1
+      },
+      "projectName": "GpuChunkGenerator",
+      "mainClass": "net.neoforged.devlaunch.Main",
+      "args": [
+        "@/home/shkeiru/Documents/Programmes/Java/Minecraft/Mods/1.21.1/GpuChunkGenerator/build/moddev/serverRunProgramArgs.txt"
+      ],
+      "vmArgs": [
+        "@/home/shkeiru/Documents/Programmes/Java/Minecraft/Mods/1.21.1/GpuChunkGenerator/build/moddev/serverRunVmArgs.txt",
+        "-Dfml.modFolders\u003dgpugen%%/home/shkeiru/Documents/Programmes/Java/Minecraft/Mods/1.21.1/GpuChunkGenerator/bin/main"
+      ],
+      "cwd": "${workspaceFolder}/run",
+      "env": {},
+      "console": "internalConsole",
+      "shortenCommandLine": "none"
+    }
+  ]
+}
