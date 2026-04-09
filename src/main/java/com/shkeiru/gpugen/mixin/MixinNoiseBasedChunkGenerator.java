@@ -41,8 +41,10 @@ public class MixinNoiseBasedChunkGenerator {
                 
                 // L'AST est extrait depuis le RandomState qui contient les instances ancrées sur la Seed du monde.
                 var finalDensityProvider = randomState.router().finalDensity();
+                int minY = chunk.getMinBuildHeight();
+                int height = chunk.getHeight();
                 
-                DensityToGLSLTranspiler transpiler = new DensityToGLSLTranspiler();
+                DensityToGLSLTranspiler transpiler = new DensityToGLSLTranspiler(minY, height);
                 String glslSource = transpiler.compileShaderSource(finalDensityProvider);
                 
                 byte[] permutationData = transpiler.getPermutationData();

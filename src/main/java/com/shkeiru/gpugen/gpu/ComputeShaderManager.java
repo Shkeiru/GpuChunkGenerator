@@ -26,7 +26,7 @@ public class ComputeShaderManager {
     private int outputSSBO = 0;
     private int permutationSSBO = 0;
 
-    private static final int OUTPUT_BUFFER_SIZE = 16 * 16 * 384 * 4;
+    private static final int OUTPUT_BUFFER_SIZE = 16 * 16 * 4096 * 4;
 
     private ComputeShaderManager() { }
 

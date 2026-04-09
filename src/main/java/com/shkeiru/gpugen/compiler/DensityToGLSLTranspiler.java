@@ -15,30 +15,46 @@ import java.util.Map;
  */
 public class DensityToGLSLTranspiler {
 
-    private int splineIndex = 0;
-    private int noiseIndex = 0;
-    private int cacheCounter = 0;
+    private enum EvalMode { PHASE1A_2D, PHASE1B_GRID, PHASE2_VOXEL }
+    private EvalMode currentMode = EvalMode.PHASE2_VOXEL;
+    private int interpolatedGridCounter = 0;
+    
+    private final int minY;
+    private final int maxY;
+    private final int cellCountY;
+    private final int gridSize;
+
     private int varCounter = 0;
     private boolean inCache2D = false;
     
     private final StringBuilder globalScopeBuilder = new StringBuilder();
-    
-    // Buffer 2D : code GLSL injecté AVANT la boucle Y (hoisting)
     private final StringBuilder setup2DSnippets = new StringBuilder();
+    private final StringBuilder gridSnippets = new StringBuilder();
+    private final StringBuilder pixelSnippets = new StringBuilder();
     
-    // Buffer 3D : code GLSL injecté DANS la boucle Y
-    private final StringBuilder loop3DSnippets = new StringBuilder();
-    
-    // Pour les Permutations GPU :
     private final Map<Object, NoiseInfo> noiseRegistry = new IdentityHashMap<>();
     private final java.util.List<byte[]> globalPermutationsList = new java.util.ArrayList<>();
     private int currentOctaveOffset = 0;
     
-    // Cache DAG : évite de recalculer un sous-arbre identique (ref identity)
     private final Map<DensityFunction, String> evaluatedNodes = new IdentityHashMap<>();
     private final Map<DensityFunction, Integer> evaluated2DIndices = new IdentityHashMap<>();
 
-    public DensityToGLSLTranspiler() { }
+    public DensityToGLSLTranspiler(int minY, int height) {
+        this.minY = minY;
+        this.maxY = minY + height;
+        this.cellCountY = (height / 8) + 1;
+        this.gridSize = 25 * this.cellCountY;
+    }
+
+    private void appendSnippet(String snippet) {
+        if (currentMode == EvalMode.PHASE1A_2D) {
+            setup2DSnippets.append(snippet);
+        } else if (currentMode == EvalMode.PHASE1B_GRID) {
+            gridSnippets.append(snippet);
+        } else {
+            pixelSnippets.append(snippet);
+        }
+    }
 
     public String compileShaderSource(DensityFunction root) {
         String inlinedExpression = visit(root);
@@ -50,7 +66,9 @@ public class DensityToGLSLTranspiler {
         fullShader.append(globalScopeBuilder.toString());
         
         fullShader.append("\n// --- SHARED DATA ---\n");
-        fullShader.append("    shared float grid[1225];\n");
+        for (int i = 0; i < interpolatedGridCounter; i++) {
+            fullShader.append("    shared float grid_").append(i).append("[").append(gridSize).append("];\n");
+        }
         if (varCounter > 0) fullShader.append("    shared float cache2D_array[25][").append(varCounter).append("];\n");
         
         fullShader.append("""
@@ -61,8 +79,8 @@ public class DensityToGLSLTranspiler {
             while (idx < 25u) {
                 uint gridX = idx % 5u;
                 uint gridZ = idx / 5u;
-                float global_x = float(chunkX * 16 + gridX * 4);
-                float global_z = float(chunkZ * 16 + gridZ * 4);
+                float global_x = float(chunkX * 16 + int(gridX) * 4);
+                float global_z = float(chunkZ * 16 + int(gridZ) * 4);
                 float global_y = 0.0;
         """);
         
@@ -72,29 +90,36 @@ public class DensityToGLSLTranspiler {
                 idx += 256u;
             }
             barrier();
-            
-            // --- PHASE 1.B : AST 3D SUR LA GRILLE ---
-            idx = gl_LocalInvocationIndex;
-            while (idx < 1225u) {
-                uint gridX = idx % 5u;
-                uint gridY = (idx / 5u) % 49u;
-                uint gridZ = idx / 245u;
-                uint idx2D = gridZ * 5u + gridX;
-                
-                float global_x = float(chunkX * 16 + gridX * 4);
-                float global_y = float(-64 + gridY * 8);
-                float global_z = float(chunkZ * 16 + gridZ * 4);
         """);
         
-        fullShader.append(loop3DSnippets.toString());
-        fullShader.append("        grid[idx] = ").append(inlinedExpression).append(";\n");
-        
-        fullShader.append("""
+        if (interpolatedGridCounter > 0) {
+            fullShader.append("""
+            // --- PHASE 1.B : AST 3D SUR LA GRILLE (HYBRIDE) ---
+            idx = gl_LocalInvocationIndex;
+            while (idx < """).append(gridSize).append("""
+            u) {
+                uint gridX = idx % 5u;
+                uint gridY = (idx / 5u) % """).append(cellCountY).append("""
+                u;
+                uint gridZ = idx / """).append(5 * cellCountY).append("""
+                u;
+                uint idx2D = gridZ * 5u + gridX;
+                
+                float global_x = float(chunkX * 16 + int(gridX) * 4);
+                float global_y = float(""").append(minY).append(" + int(gridY) * 8);\n");
+            fullShader.append("""
+                float global_z = float(chunkZ * 16 + int(gridZ) * 4);
+        """);
+            fullShader.append(gridSnippets.toString());
+            fullShader.append("""
                 idx += 256u;
             }
             barrier();
+            """);
+        }
             
-            // --- PHASE 2 : INTERPOLATION ET RLE ---
+        fullShader.append("""
+            // --- PHASE 2 : INTERPOLATION ET RLE (VOXEL PAR VOXEL) ---
             uint b_idx = gl_LocalInvocationIndex;
             if (b_idx < 256u) {
                 int localX = int(b_idx % 16u);
@@ -104,34 +129,35 @@ public class DensityToGLSLTranspiler {
                 float tx = float(localX % 4) / 4.0;
                 float tz = float(localZ % 4) / 4.0;
                 
-                uint write_offset = uint((localZ * 16 + localX) * 384);
+                uint write_offset = uint((localZ * 16 + localX) * """).append(maxY - minY).append("""
+                );
                 uint current_id = 0u;
                 uint run_count = 0u;
                 
-                for (int y_iter = -64; y_iter < 320; y_iter++) {
-                    int cy = (y_iter - -64) / 8;
-                    float ty = float((y_iter - -64) % 8) / 8.0;
+                for (int y_iter = """).append(minY).append("; y_iter < ").append(maxY).append("""
+                ; y_iter++) {
+                    int cy = (y_iter - """).append(minY).append("""
+                    ) / 8;
+                    float ty = float((y_iter - """).append(minY).append("""
+                    ) % 8) / 8.0;
                     
-                    float v000 = grid[cz * 245u + cy * 5u + cx];
-                    float v100 = grid[cz * 245u + cy * 5u + (cx + 1u)];
-                    float v010 = grid[cz * 245u + (cy + 1u) * 5u + cx];
-                    float v110 = grid[cz * 245u + (cy + 1u) * 5u + (cx + 1u)];
-                    float v001 = grid[(cz + 1u) * 245u + cy * 5u + cx];
-                    float v101 = grid[(cz + 1u) * 245u + cy * 5u + (cx + 1u)];
-                    float v011 = grid[(cz + 1u) * 245u + (cy + 1u) * 5u + cx];
-                    float v111 = grid[(cz + 1u) * 245u + (cy + 1u) * 5u + (cx + 1u)];
+                    float global_x = float(chunkX * 16 + localX);
+                    float global_y = float(y_iter);
+                    float global_z = float(chunkZ * 16 + localZ);
                     
-                    float final_density = mix(
-                        mix(mix(v000, v100, tx), mix(v010, v110, tx), ty),
-                        mix(mix(v001, v101, tx), mix(v011, v111, tx), ty),
-                        tz
-                    );
-                    
+                    uint idx2D = uint(cz) * 5u + uint(cx);
+        """);
+        
+        fullShader.append(pixelSnippets.toString());
+        fullShader.append("            float final_density = ").append(inlinedExpression).append(";\n");
+
+        fullShader.append("""
                     uint block_id = 0u; // Air
                     if (final_density > 0.0) block_id = 1u; // Roche
                     else if (y_iter < 63) block_id = 2u; // Eau
                     
-                    if (y_iter == -64) {
+                    if (y_iter == """).append(minY).append("""
+                    ) {
                         current_id = block_id;
                         run_count = 1u;
                     } else {
@@ -171,7 +197,24 @@ public class DensityToGLSLTranspiler {
                 // --- STRUCTURELS (Pass-Through) ---
                 case "HolderHolder"       -> visit(unwrapHolderHolder(node));
                 case "Marker"             -> visit(unwrapMarker(node));
-                case "Interpolated"       -> visit(unwrapMarker(node));
+                case "Interpolated"       -> {
+                    EvalMode oldMode = currentMode;
+                    currentMode = EvalMode.PHASE1B_GRID;
+                    int myGridId = interpolatedGridCounter++;
+                    
+                    String gridExpr = visit(unwrapMarker(node));
+                    gridSnippets.append("                grid_").append(myGridId).append("[idx] = ").append(gridExpr).append(";\n");
+                    
+                    currentMode = oldMode;
+                    
+                    String n = "grid_" + myGridId;
+                    yield "mix(" +
+                           "  mix(mix(" + n + "[cz * " + (5 * cellCountY) + "u + cy * 5u + cx], " + n + "[cz * " + (5 * cellCountY) + "u + cy * 5u + (cx + 1u)], tx), " +
+                           "      mix(" + n + "[cz * " + (5 * cellCountY) + "u + (cy + 1u) * 5u + cx], " + n + "[cz * " + (5 * cellCountY) + "u + (cy + 1u) * 5u + (cx + 1u)], tx), ty), " +
+                           "  mix(mix(" + n + "[(cz + 1u) * " + (5 * cellCountY) + "u + cy * 5u + cx], " + n + "[(cz + 1u) * " + (5 * cellCountY) + "u + cy * 5u + (cx + 1u)], tx), " +
+                           "      mix(" + n + "[(cz + 1u) * " + (5 * cellCountY) + "u + (cy + 1u) * 5u + cx], " + n + "[(cz + 1u) * " + (5 * cellCountY) + "u + (cy + 1u) * 5u + (cx + 1u)], tx), ty), " +
+                           "tz)";
+                }
                 case "BlendDensity"       -> visit(unwrapSingleArg(node));
                 case "BlendAlpha"         -> "1.0";
                 case "BlendOffset"        -> "0.0";
@@ -227,7 +270,7 @@ public class DensityToGLSLTranspiler {
             setup2DSnippets.append("                cache2D_array[idx][").append(myVarId - 1).append("u] = ").append(varName).append(";\n");
             evaluated2DIndices.put(node, myVarId - 1);
         } else {
-            loop3DSnippets.append("                float ").append(varName).append(" = ").append(result).append(";\n");
+            appendSnippet("                float " + varName + " = " + result + ";\n");
         }
 
         evaluatedNodes.put(node, varName);
@@ -710,8 +753,18 @@ public class DensityToGLSLTranspiler {
         }
         if ("Multipoint".equals(splineType)) {
             Object coordinateObj = getObj(rawSpline, "coordinate");
-            // Astuce : dans Multipoint, la coordonnée EST la DensityFunction elle-même
-            DensityFunction coordinateFunc = (DensityFunction) coordinateObj; 
+            DensityFunction coordinateFunc = null;
+            if (coordinateObj instanceof DensityFunction func) {
+                coordinateFunc = func;
+            } else {
+                for (java.lang.reflect.Field f : coordinateObj.getClass().getDeclaredFields()) {
+                    if (DensityFunction.class.isAssignableFrom(f.getType())) {
+                        f.setAccessible(true);
+                        coordinateFunc = (DensityFunction) f.get(coordinateObj);
+                        break;
+                    }
+                }
+            } 
             String p = visit(coordinateFunc);
 
             float[] locs = (float[]) getObj(rawSpline, "locations");
